@@ -6,6 +6,7 @@ using System.Reflection;
 using UnityEngine;
 using KSP.IO;
 using System.Diagnostics;
+using UnityEngine.Profiling;
 using UnityToolbag;
 using Debug = UnityEngine.Debug;
 using File = KSP.IO.File;
@@ -39,25 +40,22 @@ namespace MuMech
         public MechJebModuleRoverController rover;
         public MechJebModuleNodeExecutor node;
         public MechJebModuleSolarPanelController solarpanel;
+        public MechJebModuleDeployableAntennaController antennaControl;
         public MechJebModuleLandingAutopilot landing;
         public MechJebModuleSettings settings;
+        public MechJebModuleAirplaneAutopilot airplane;
 
         public VesselState vesselState = new VesselState();
-
         [KSPField(isPersistant = true, guiActive = true, guiActiveEditor = true, guiName = "MechJeb"), UI_Toggle(disabledText = "Disabled", enabledText = "Enabled")]
         public bool running = true;
-
         private Vessel controlledVessel; //keep track of which vessel we've added our onFlyByWire callback to
-
         public string version = "";
-
         private bool deactivateControl = false;
-
         public MechJebCore MasterMechJeb
         {
             get { return vessel.GetMasterMechJeb(); }
         }
-
+        
         // Allow other mods to kill MJ ability to control vessel (RemoteTech, RO...)
         public bool DeactivateControl
         {
@@ -82,8 +80,13 @@ namespace MuMech
 
         [KSPField(isPersistant = false)]
         public bool eduMode = false;
-        
+
         public bool rssMode { get { return settings.rssMode; } }
+
+        public bool ShowGui
+        {
+            get { return showGui; }
+        }
 
         [KSPAction("Orbit Prograde")]
         public void OnOrbitProgradeAction(KSPActionParam param)
@@ -306,7 +309,7 @@ namespace MuMech
 
         public bool someModuleAreLocked = false; // True if any module was locked by the R&D system
 
-        //Returns whether the vessel we've registered OnFlyByWire with is the correct one. 
+        //Returns whether the vessel we've registered OnFlyByWire with is the correct one.
         //If it isn't the correct one, fixes it before returning false
         bool CheckControlledVessel()
         {
@@ -365,28 +368,7 @@ namespace MuMech
             sortedModules[key] = value = unorderedComputerModules.OfType<T>().Cast<ComputerModule>().OrderBy(m => m).ToList();
             return value;
         }
-
-        //public IEnumerable<T> GetComputerModules<T>() where T : ComputerModule
-        //{
-        //    Type key = typeof(T);
-        //    IEnumerable<ComputerModule> value;
-        //    if (sortedModules.TryGetValue(key, out value))
-        //        return value.Cast<T>();
-        //    sortedModules[key] = value = unorderedComputerModules.OfType<T>().Cast<ComputerModule>().OrderBy(m => m).ToList();
-        //    return value.Cast<T>();
-        //}
-
-        // Return the list of modules of type T in the order specified by comparer function
-        // Be sure to always use the same instance of comparer in order to avoid memory leaks
-        //public IEnumerable<T> GetComputerModules<T>(IComparer<T> comparer) where T : ComputerModule
-        //{
-        //    IEnumerable<ComputerModule> value;
-        //    if (sortedModules.TryGetValue(comparer, out value))
-        //        return value.Cast<T>();
-        //    sortedModules[comparer] = value = unorderedComputerModules.OfType<T>().OrderBy(m => m, comparer).Cast<ComputerModule>().ToList();
-        //    return value.Cast<T>();
-        //}
-
+        
         // Added because the generic version eats memory like candy when casting from ComputerModule to DisplayModule (.Cast<T>())
         public List<DisplayModule> GetDisplayModules(IComparer<DisplayModule> comparer)
         {
@@ -461,7 +443,7 @@ namespace MuMech
                 ready = true;
             if (state == PartModule.StartState.None) return; //don't do anything when we start up in the loading screen
 
-            //OnLoad doesn't get called for parts created in editor, so do that manually so 
+            //OnLoad doesn't get called for parts created in editor, so do that manually so
             //that we can load global settings.
             //However, if you press ctrl-Z, a new PartModule object gets created, on which the
             //game DOES call OnLoad, and then OnStart. So before calling OnLoad from OnStart,
@@ -474,8 +456,8 @@ namespace MuMech
                 OnLoad(null);
             }
 
-            GameEvents.onShowUI.Add(ShowGUI);
-            GameEvents.onHideUI.Add(HideGUI);
+            GameEvents.onShowUI.Add(OnShowGUI);
+            GameEvents.onHideUI.Add(OnHideGUI);
             GameEvents.onVesselChange.Add(UnlockControl);
 
             lastSettingsSaveTime = Time.time;
@@ -676,7 +658,7 @@ namespace MuMech
             Profiler.BeginSample("OnMenuUpdate");
             GetComputerModule<MechJebModuleMenu>().OnMenuUpdate(); // Allow the menu movement, even while in Editor
             Profiler.EndSample();
-            
+
             if (vessel == null)
             {
                 Profiler.EndSample();
@@ -708,7 +690,7 @@ namespace MuMech
                 {
                     try
                     {
-                        foreach (var module in (from t in ass.GetTypes() where t.IsSubclassOf(typeof(ComputerModule)) select t).ToList())
+                        foreach (var module in (from t in ass.GetTypes() where t.IsSubclassOf(typeof(ComputerModule)) && !t.IsAbstract select t).ToList())
                         {
                             moduleRegistry.Add(module);
                         }
@@ -769,8 +751,10 @@ namespace MuMech
             rover = GetComputerModule<MechJebModuleRoverController>();
             node = GetComputerModule<MechJebModuleNodeExecutor>();
             solarpanel = GetComputerModule<MechJebModuleSolarPanelController>();
+            antennaControl = GetComputerModule<MechJebModuleDeployableAntennaController>();
             landing = GetComputerModule<MechJebModuleLandingAutopilot>();
             settings = GetComputerModule<MechJebModuleSettings>();
+            airplane = GetComputerModule<MechJebModuleAirplaneAutopilot>();
         }
 
         public override void OnLoad(ConfigNode sfsNode)
@@ -911,7 +895,7 @@ namespace MuMech
             // Only Masters can save
             if (this != vessel.GetMasterMechJeb()) return;
 
-            //KSP calls OnSave *before* OnLoad when the first command pod is created in the editor. 
+            //KSP calls OnSave *before* OnLoad when the first command pod is created in the editor.
             //Defend against saving empty settings.
             if (unorderedComputerModules.Count == 0) return;
 
@@ -991,8 +975,8 @@ namespace MuMech
                 OnSave(null);
             }
 
-            GameEvents.onShowUI.Remove(ShowGUI);
-            GameEvents.onHideUI.Remove(HideGUI);
+            GameEvents.onShowUI.Remove(OnShowGUI);
+            GameEvents.onHideUI.Remove(OnHideGUI);
             GameEvents.onVesselChange.Remove(UnlockControl);
 
             if (weLockedInputs)
@@ -1074,11 +1058,11 @@ namespace MuMech
             s.Z = Mathf.Clamp(s.Z, -1, 1);
         }
 
-        private void ShowGUI()
+        private void OnShowGUI()
         {
             showGui = true;
         }
-        private void HideGUI()
+        private void OnHideGUI()
         {
             showGui = false;
         }
@@ -1190,4 +1174,3 @@ namespace MuMech
         }
     }
 }
-
